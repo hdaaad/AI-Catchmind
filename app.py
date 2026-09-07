@@ -355,7 +355,6 @@ def render_game():
         width=CANVAS_WIDTH,
         drawing_mode="freedraw",
         update_streamlit=True,
-        display_toolbar=True,
         return_image_data=True,
         disabled=False,
         key=f"canvas_{idx}",
