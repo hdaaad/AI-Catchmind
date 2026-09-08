@@ -279,7 +279,67 @@ def get_gemini_client():
 # ============================================================
 # 이미지 처리
 # ============================================================
+def show_api_diagnostic():
+    st.markdown("### 🔧 Gemini API 진단")
 
+    try:
+        if "GEMINI_API_KEY" not in st.secrets:
+            st.error("❌ GEMINI_API_KEY가 Streamlit Secrets에 없습니다.")
+            return
+
+        api_key = str(
+            st.secrets["GEMINI_API_KEY"]
+        ).strip()
+
+        if not api_key:
+            st.error("❌ GEMINI_API_KEY 값이 비어 있습니다.")
+            return
+
+        st.success(
+            f"✅ API 키를 읽었습니다. "
+            f"길이: {len(api_key)}자"
+        )
+
+        client = genai.Client(
+            api_key=api_key
+        )
+
+        st.success("✅ Gemini 클라이언트 생성 성공")
+
+        try:
+            models = list(
+                client.models.list()
+            )
+
+            st.success(
+                f"✅ Gemini API 연결 성공 "
+                f"({len(models)}개 모델 확인)"
+            )
+
+            flash_models = [
+                m.name
+                for m in models
+                if "flash" in m.name.lower()
+            ]
+
+            st.write(
+                "사용 가능한 Flash 계열 모델:"
+            )
+
+            for model in flash_models[:20]:
+                st.code(model)
+
+        except Exception as exc:
+            st.error("❌ Gemini API 연결 실패")
+            st.code(
+                f"{type(exc).__name__}: {str(exc)}"
+            )
+
+    except Exception as exc:
+        st.error("❌ Secrets 읽기 실패")
+        st.code(
+            f"{type(exc).__name__}: {str(exc)}"
+        )
 def blank_canvas_image():
 
     return Image.new(
