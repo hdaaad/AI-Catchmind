@@ -31,7 +31,7 @@ CANVAS_HEIGHT = 360
 DISPLAY_IMG_WIDTH = 420
 THUMB_IMG_WIDTH = 170
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 CATEGORIES = {
     "동물": "🐶",
