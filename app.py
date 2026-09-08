@@ -32,7 +32,7 @@ CATEGORIES = [
     "교통수단",
 ]
 
-MODEL_NAME = "gemini-2.5-flash"
+MODEL_NAME = "gemini-3.5-flash"
 
 TIME_LIMIT = 60
 MAX_PASSES = 2
