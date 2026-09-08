@@ -23,24 +23,21 @@ st.set_page_config(
 
 ROUND_LIMIT_SEC = 60
 TOTAL_ROUNDS = 5
+MAX_PASSES = 2
 
 CANVAS_WIDTH = 620
 CANVAS_HEIGHT = 360
 
-DISPLAY_IMG_WIDTH = 380
-THUMB_IMG_WIDTH = 150
+DISPLAY_IMG_WIDTH = 420
+THUMB_IMG_WIDTH = 170
 
 # ------------------------------------------------------------
 # Gemini 모델
 # ------------------------------------------------------------
-# 그림 한 장을 보고 한 단어만 답하는 단순 작업이므로
-# 현재 안정적인 경량 모델을 사용합니다.
-#
-# gemini-flash-latest를 쓰지 않는 이유:
-# latest 별칭은 향후 더 무거운 모델로 바뀔 수 있기 때문입니다.
+# 이미지 입력을 지원하는 저비용·경량 안정 모델
 # ------------------------------------------------------------
 
-GEMINI_MODEL = "gemini-3.5-flash-lite"
+GEMINI_MODEL = "gemini-3.1-flash-lite"
 
 
 CATEGORIES = {
@@ -53,36 +50,114 @@ CATEGORIES = {
 
 
 # ============================================================
+# 디자인
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+
+    .block-container {
+        max-width: 760px;
+        padding-top: 1rem;
+        padding-bottom: 3rem;
+    }
+
+    .game-info {
+        text-align: center;
+        font-size: 15px;
+        color: #666666;
+        margin-bottom: 4px;
+    }
+
+    .keyword-box {
+        text-align: center;
+        font-size: 30px;
+        font-weight: 900;
+        background: #f3f4f6;
+        border-radius: 16px;
+        padding: 14px;
+        margin: 8px 0 12px 0;
+    }
+
+    .timer-box {
+        text-align: center;
+        font-size: 17px;
+        font-weight: 800;
+        margin-bottom: 5px;
+    }
+
+    .correct-box {
+        background: #ecfdf5;
+        border: 2px solid #22c55e;
+        border-radius: 16px;
+        padding: 18px;
+        text-align: center;
+    }
+
+    .wrong-box {
+        background: #fef2f2;
+        border: 2px solid #ef4444;
+        border-radius: 16px;
+        padding: 18px;
+        text-align: center;
+    }
+
+    .answer-label {
+        font-size: 16px;
+        color: #666666;
+        font-weight: 700;
+    }
+
+    .answer-text {
+        font-size: 29px;
+        font-weight: 900;
+        margin-bottom: 8px;
+    }
+
+    div.stButton > button {
+        min-height: 50px;
+        font-size: 16px;
+        font-weight: 700;
+        border-radius: 12px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
 # Session State 초기화
 # ============================================================
 
 DEFAULTS = {
-    "page": "start",                 # start / game / processing / grading / ai_error / result
+    "page": "start",
+
     "category": None,
+
     "keyword_pool": [],
     "keyword_pointer": 0,
     "current_item": None,
 
-    # 실제 채점 완료 문제 수
     "round_idx": 0,
-
+    "passes_used": 0,
     "rounds": [],
 
     "round_start_time": None,
 
-    # 캔버스 재생성용 고유 번호
     "draw_seq": 0,
 
-    # 마지막 캔버스 그림
-    "_last_canvas_data": None,
+    "last_canvas_data": None,
 
     # 중복 제출 방지
-    "_submitted_seq": None,
+    "submitted_seq": None,
 
-    # 시간초과 자동 제출 방지
-    "_timeout_handled_seq": None,
+    # 시간 종료 중복 처리 방지
+    "timeout_seq": None,
 
-    # 제출 대기 중인 그림
+    # 제출 대기 정보
     "pending_image_bytes": None,
     "pending_item": None,
     "pending_timed_out": False,
@@ -90,16 +165,22 @@ DEFAULTS = {
     # AI 오류
     "ai_error_type": None,
     "ai_error_message": None,
+    "ai_retry_seconds": None,
+
+    # 그림 도구
+    "stroke_color": "#000000",
+    "stroke_width": 8,
 }
 
 
 for key, value in DEFAULTS.items():
+
     if key not in st.session_state:
         st.session_state[key] = value
 
 
 # ============================================================
-# keyword.csv
+# keyword.csv 읽기
 # ============================================================
 
 @st.cache_data
@@ -116,16 +197,22 @@ def load_keywords():
     }
 
     if not required.issubset(df.columns):
+
         raise ValueError(
-            "keyword.csv에는 '카테고리', '키워드' 열이 필요합니다."
+            "keyword.csv에는 "
+            "'카테고리', '키워드' 열이 필요합니다."
         )
 
-    # 유사정답은 없어도 실행 가능
+    # 유사정답은 없어도 됨
     if "유사정답" not in df.columns:
         df["유사정답"] = ""
 
     df = df[
-        ["카테고리", "키워드", "유사정답"]
+        [
+            "카테고리",
+            "키워드",
+            "유사정답",
+        ]
     ].copy()
 
     df["카테고리"] = (
@@ -147,56 +234,51 @@ def load_keywords():
 # Gemini Client
 # ============================================================
 
-@st.cache_resource
 def get_gemini_client():
 
     try:
+
+        # Secret 존재 여부 확인
+        if "GEMINI_API_KEY" not in st.secrets:
+
+            return None, (
+                "Streamlit Secrets에서 "
+                "GEMINI_API_KEY를 찾을 수 없습니다."
+            )
+
         api_key = str(
             st.secrets["GEMINI_API_KEY"]
         ).strip()
 
         if not api_key:
-            return None
 
-        return genai.Client(
+            return None, (
+                "GEMINI_API_KEY 값이 비어 있습니다."
+            )
+
+        client = genai.Client(
             api_key=api_key
         )
 
+        return client, None
+
     except Exception as exc:
 
-        print(
-            "[Gemini Client 오류]",
-            type(exc).__name__,
-            str(exc),
+        error_message = (
+            f"{type(exc).__name__}: {str(exc)}"
         )
 
-        return None
+        print(
+            "[Gemini Client 생성 오류]",
+            error_message,
+        )
+
+        return None, error_message
 
 
 # ============================================================
 # 이미지 처리
 # ============================================================
-
-def canvas_array_to_pil(image_data):
-
-    rgba = Image.fromarray(
-        image_data.astype("uint8"),
-        mode="RGBA",
-    )
-
-    white_bg = Image.new(
-        "RGB",
-        rgba.size,
-        "white",
-    )
-
-    white_bg.paste(
-        rgba,
-        mask=rgba.split()[3],
-    )
-
-    return white_bg
-
 
 def blank_canvas_image():
 
@@ -210,26 +292,32 @@ def blank_canvas_image():
     )
 
 
-def optimize_image_for_ai(image: Image.Image):
+def canvas_array_to_pil(
+    image_data,
+):
 
-    """
-    화면에는 620x360 그림을 그대로 유지하지만
-    Gemini 전송용 이미지만 축소합니다.
-    """
-
-    optimized = image.copy()
-
-    optimized.thumbnail(
-        (384, 384)
+    rgba = Image.fromarray(
+        image_data.astype("uint8"),
+        mode="RGBA",
     )
 
-    if optimized.mode != "RGB":
-        optimized = optimized.convert("RGB")
+    white_background = Image.new(
+        "RGB",
+        rgba.size,
+        "white",
+    )
 
-    return optimized
+    white_background.paste(
+        rgba,
+        mask=rgba.getchannel("A"),
+    )
+
+    return white_background
 
 
-def pil_to_png_bytes(image: Image.Image):
+def pil_to_png_bytes(
+    image,
+):
 
     buffer = BytesIO()
 
@@ -241,20 +329,46 @@ def pil_to_png_bytes(image: Image.Image):
     return buffer.getvalue()
 
 
+def optimize_image_for_ai(
+    image,
+):
+
+    """
+    화면에는 원본 그림을 유지하고
+    Gemini로 보낼 때만 작게 줄입니다.
+    """
+
+    optimized = image.copy()
+
+    optimized.thumbnail(
+        (384, 384)
+    )
+
+    if optimized.mode != "RGB":
+        optimized = optimized.convert(
+            "RGB"
+        )
+
+    return optimized
+
+
 # ============================================================
-# AI 응답 정리
+# AI 답변 정리
 # ============================================================
 
-def clean_ai_answer(text):
+def clean_ai_answer(
+    text,
+):
 
     if not text:
         return ""
 
     text = str(text).strip()
 
-    # 혹시 "정답: 사과"처럼 나온 경우 처리
+    # 정답: 사과 → 사과
     text = re.sub(
-        r"^(정답|답|추측)\s*[:：\-]?\s*",
+        r"^(정답|답|추측)"
+        r"\s*[:：\-]?\s*",
         "",
         text,
     )
@@ -271,7 +385,44 @@ def clean_ai_answer(text):
 
 
 # ============================================================
-# Gemini AI 호출
+# 429 재시도 시간 추출
+# ============================================================
+
+def extract_retry_seconds(
+    message,
+):
+
+    patterns = [
+        r"retry in ([0-9.]+)s",
+        r"retryDelay['\"]?\s*:\s*['\"]?([0-9]+)s",
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            message,
+            re.IGNORECASE,
+        )
+
+        if match:
+
+            try:
+
+                return int(
+                    float(
+                        match.group(1)
+                    )
+                ) + 1
+
+            except Exception:
+                pass
+
+    return 60
+
+
+# ============================================================
+# Gemini 호출
 # ============================================================
 
 def ask_ai_guess(
@@ -279,35 +430,34 @@ def ask_ai_guess(
     category: str,
 ):
 
-    client = get_gemini_client()
+    client, client_error = (
+        get_gemini_client()
+    )
+
+    # --------------------------------------------------------
+    # API 키 설정 오류
+    # --------------------------------------------------------
 
     if client is None:
 
         return {
             "success": False,
             "type": "configuration",
-            "message": "API 키 설정을 확인해 주세요.",
+            "message": client_error,
         }
 
     # --------------------------------------------------------
-    # 무료 사용량 절약:
-    # AI에 보내는 이미지만 축소
+    # AI 전송용 이미지 축소
     # --------------------------------------------------------
 
     ai_image = optimize_image_for_ai(
         image
     )
 
-    image_bytes = pil_to_png_bytes(
-        ai_image
-    )
+    # --------------------------------------------------------
+    # 짧은 프롬프트
+    # --------------------------------------------------------
 
-    image_part = types.Part.from_bytes(
-        data=image_bytes,
-        mime_type="image/png",
-    )
-
-    # 프롬프트도 가능한 짧게 유지
     prompt = (
         f"초등학생이 그린 그림이다. "
         f"카테고리는 '{category}'이다. "
@@ -316,8 +466,7 @@ def ask_ai_guess(
         f"설명 없이 한 단어로만 답하라."
     )
 
-    # 503 서버 혼잡일 때만
-    # 최대 1회 추가 재시도
+    # 최초 호출 + 503일 때만 한 번 재시도
     max_attempts = 2
 
     for attempt in range(
@@ -326,22 +475,45 @@ def ask_ai_guess(
 
         try:
 
+            print(
+                "[Gemini 호출]",
+                f"model={GEMINI_MODEL}",
+                f"attempt={attempt + 1}",
+            )
+
+            # 공식 SDK는 PIL.Image 입력을 직접 지원
             response = (
                 client.models.generate_content(
+
                     model=GEMINI_MODEL,
+
                     contents=[
                         prompt,
-                        image_part,
+                        ai_image,
                     ],
-                    config=types.GenerateContentConfig(
-                        temperature=0.1,
-                        max_output_tokens=10,
+
+                    config=(
+                        types.GenerateContentConfig(
+                            temperature=0.1,
+                            max_output_tokens=16,
+                        )
                     ),
                 )
             )
 
-            answer = clean_ai_answer(
+            raw_text = (
                 response.text
+                or
+                ""
+            )
+
+            print(
+                "[Gemini 원본 응답]",
+                repr(raw_text),
+            )
+
+            answer = clean_ai_answer(
+                raw_text
             )
 
             if not answer:
@@ -349,13 +521,19 @@ def ask_ai_guess(
                 return {
                     "success": False,
                     "type": "empty",
-                    "message": "AI가 답을 생성하지 못했습니다.",
+                    "message": (
+                        "AI가 답을 생성하지 못했습니다."
+                    ),
                 }
 
             return {
                 "success": True,
                 "answer": answer,
             }
+
+        # ====================================================
+        # Gemini API 오류
+        # ====================================================
 
         except Exception as exc:
 
@@ -367,14 +545,11 @@ def ask_ai_guess(
                 message,
             )
 
-            # =================================================
-            # 429
-            # 무료 사용량 / RPM 초과
+            # ------------------------------------------------
+            # 429 - 무료 API 한도 초과
             #
-            # 중요:
-            # 여기서는 자동 재시도하지 않음.
-            # 괜히 API 호출 횟수만 더 소비하기 때문.
-            # =================================================
+            # 자동 재호출하지 않음
+            # ------------------------------------------------
 
             if (
                 "429" in message
@@ -382,19 +557,25 @@ def ask_ai_guess(
                 "RESOURCE_EXHAUSTED" in message
             ):
 
+                retry_seconds = (
+                    extract_retry_seconds(
+                        message
+                    )
+                )
+
                 return {
                     "success": False,
                     "type": "quota",
+                    "retry_seconds": retry_seconds,
                     "message": (
-                        "AI 무료 사용량 제한에 도달했습니다. "
-                        "약 1분 후 다시 시도해 주세요."
+                        "Gemini 무료 사용량 제한에 "
+                        "도달했습니다."
                     ),
                 }
 
-            # =================================================
-            # 503
-            # 서버 혼잡은 1회만 재시도
-            # =================================================
+            # ------------------------------------------------
+            # 503 - 서버 혼잡
+            # ------------------------------------------------
 
             if (
                 "503" in message
@@ -412,15 +593,14 @@ def ask_ai_guess(
                     "success": False,
                     "type": "server",
                     "message": (
-                        "AI 서버가 현재 혼잡합니다. "
+                        "Gemini 서버가 현재 혼잡합니다. "
                         "잠시 후 다시 시도해 주세요."
                     ),
                 }
 
-            # =================================================
-            # 404
-            # 모델 종료 / 모델명 문제
-            # =================================================
+            # ------------------------------------------------
+            # 404 - 모델 문제
+            # ------------------------------------------------
 
             if (
                 "404" in message
@@ -432,41 +612,77 @@ def ask_ai_guess(
                     "success": False,
                     "type": "model",
                     "message": (
-                        "현재 AI 모델을 사용할 수 없습니다. "
-                        "모델 설정을 확인해 주세요."
+                        f"{GEMINI_MODEL} 모델을 "
+                        f"현재 사용할 수 없습니다.\n\n"
+                        f"실제 오류: {message}"
                     ),
                 }
 
-            # =================================================
-            # 401 / 403
-            # API 키 / 권한
-            # =================================================
+            # ------------------------------------------------
+            # 401
+            # ------------------------------------------------
 
-            if (
-                "401" in message
-                or
-                "403" in message
-            ):
+            if "401" in message:
 
                 return {
                     "success": False,
                     "type": "configuration",
                     "message": (
-                        "Gemini API 키 또는 권한 설정을 "
-                        "확인해 주세요."
+                        "Gemini API 키 인증에 실패했습니다.\n\n"
+                        f"실제 오류: {message}"
                     ),
                 }
+
+            # ------------------------------------------------
+            # 403
+            # ------------------------------------------------
+
+            if "403" in message:
+
+                return {
+                    "success": False,
+                    "type": "configuration",
+                    "message": (
+                        "Gemini API 사용 권한이 없습니다.\n\n"
+                        f"실제 오류: {message}"
+                    ),
+                }
+
+            # ------------------------------------------------
+            # 400
+            # ------------------------------------------------
+
+            if "400" in message:
+
+                return {
+                    "success": False,
+                    "type": "request",
+                    "message": (
+                        "Gemini 요청 형식 오류입니다.\n\n"
+                        f"실제 오류: {message}"
+                    ),
+                }
+
+            # ------------------------------------------------
+            # 그 외
+            # ------------------------------------------------
 
             return {
                 "success": False,
                 "type": "unknown",
-                "message": "AI 호출 중 오류가 발생했습니다.",
+                "message": (
+                    "AI 호출 중 예상하지 못한 "
+                    "오류가 발생했습니다.\n\n"
+                    f"실제 오류: {message}"
+                ),
             }
 
     return {
         "success": False,
         "type": "unknown",
-        "message": "AI 호출에 실패했습니다.",
+        "message": (
+            "AI 호출에 실패했습니다."
+        ),
     }
 
 
@@ -474,19 +690,31 @@ def ask_ai_guess(
 # 정답 판정
 # ============================================================
 
+def normalize_answer(
+    text,
+):
+
+    return re.sub(
+        r"\s+",
+        "",
+        str(text).strip(),
+    )
+
+
 def is_correct(
     ai_answer,
     item,
 ):
 
     valid_answers = {
-        str(
+        normalize_answer(
             item["키워드"]
-        ).strip()
+        )
     }
 
     similar = item.get(
-        "유사정답"
+        "유사정답",
+        "",
     )
 
     if (
@@ -495,15 +723,24 @@ def is_correct(
         similar.strip()
     ):
 
-        valid_answers |= {
-            answer.strip()
-            for answer
-            in similar.split("|")
-            if answer.strip()
-        }
+        for answer in similar.split(
+            "|"
+        ):
+
+            answer = answer.strip()
+
+            if answer:
+
+                valid_answers.add(
+                    normalize_answer(
+                        answer
+                    )
+                )
 
     return (
-        str(ai_answer).strip()
+        normalize_answer(
+            ai_answer
+        )
         in
         valid_answers
     )
@@ -523,47 +760,42 @@ def draw_next_keyword():
         st.session_state.keyword_pointer
     )
 
-    prev_word = None
+    previous_word = None
 
     if st.session_state.current_item:
 
-        prev_word = (
+        previous_word = (
             st.session_state.current_item[
                 "키워드"
             ]
         )
 
     # --------------------------------------------------------
-    # 모든 단어를 사용했으면 다시 섞음
+    # 제시어를 모두 사용했으면 다시 섞음
     # --------------------------------------------------------
 
     if pointer >= len(pool):
 
-        reshuffled = pool[:]
+        pool = pool[:]
 
         random.shuffle(
-            reshuffled
+            pool
         )
 
         if (
-            prev_word is not None
+            previous_word
             and
-            len(reshuffled) > 1
+            len(pool) > 1
             and
-            reshuffled[0]["키워드"]
+            pool[0]["키워드"]
             ==
-            prev_word
+            previous_word
         ):
 
-            (
-                reshuffled[0],
-                reshuffled[1],
-            ) = (
-                reshuffled[1],
-                reshuffled[0],
+            pool[0], pool[1] = (
+                pool[1],
+                pool[0],
             )
-
-        pool = reshuffled
 
         pointer = 0
 
@@ -572,7 +804,7 @@ def draw_next_keyword():
         )
 
     # --------------------------------------------------------
-    # 다음 문제
+    # 현재 문제 설정
     # --------------------------------------------------------
 
     st.session_state.current_item = (
@@ -587,16 +819,19 @@ def draw_next_keyword():
         time.time()
     )
 
-    st.session_state._last_canvas_data = (
+    st.session_state.last_canvas_data = (
         None
     )
 
     st.session_state.draw_seq += 1
 
-    # 새로운 라운드이므로 중복 제출 정보 초기화
-    st.session_state._submitted_seq = None
+    st.session_state.submitted_seq = (
+        None
+    )
 
-    st.session_state._timeout_handled_seq = None
+    st.session_state.timeout_seq = (
+        None
+    )
 
 
 # ============================================================
@@ -620,10 +855,11 @@ def start_new_game(
         )
     )
 
-    if len(subset) == 0:
+    if not subset:
 
         st.error(
-            "해당 카테고리에 제시어가 없습니다."
+            "해당 카테고리에 "
+            "제시어가 없습니다."
         )
 
         return
@@ -642,23 +878,41 @@ def start_new_game(
 
     st.session_state.keyword_pointer = 0
 
-    st.session_state.current_item = None
+    st.session_state.current_item = (
+        None
+    )
 
     st.session_state.round_idx = 0
 
+    st.session_state.passes_used = 0
+
     st.session_state.rounds = []
 
-    st.session_state.pending_image_bytes = None
+    st.session_state.pending_image_bytes = (
+        None
+    )
 
-    st.session_state.pending_item = None
+    st.session_state.pending_item = (
+        None
+    )
 
-    st.session_state.ai_error_type = None
+    st.session_state.ai_error_type = (
+        None
+    )
 
-    st.session_state.ai_error_message = None
+    st.session_state.ai_error_message = (
+        None
+    )
+
+    st.session_state.ai_retry_seconds = (
+        None
+    )
 
     draw_next_keyword()
 
-    st.session_state.page = "game"
+    st.session_state.page = (
+        "game"
+    )
 
 
 # ============================================================
@@ -670,40 +924,47 @@ def prepare_submission(
     timed_out=False,
 ):
 
-    # --------------------------------------------------------
-    # 같은 라운드에서 두 번 제출되는 것 방지
-    #
-    # 중요한 점:
-    # 첫 클릭에서는 항상 통과함.
-    # --------------------------------------------------------
-
     current_seq = (
         st.session_state.draw_seq
     )
 
+    # 같은 문제 중복 제출 방지
     if (
-        st.session_state._submitted_seq
+        st.session_state.submitted_seq
         ==
         current_seq
     ):
 
         return
 
-    st.session_state._submitted_seq = (
+    st.session_state.submitted_seq = (
         current_seq
     )
 
     # --------------------------------------------------------
-    # 현재 그림을 즉시 스냅샷으로 변환
+    # 현재 그림 저장
     # --------------------------------------------------------
 
     if image_data is not None:
 
-        snapshot = (
-            canvas_array_to_pil(
-                image_data
+        try:
+
+            snapshot = (
+                canvas_array_to_pil(
+                    image_data
+                )
             )
-        )
+
+        except Exception as exc:
+
+            print(
+                "[Canvas 변환 오류]",
+                str(exc),
+            )
+
+            snapshot = (
+                blank_canvas_image()
+            )
 
     else:
 
@@ -727,9 +988,10 @@ def prepare_submission(
         timed_out
     )
 
-    # API 호출은 다음 화면에서 수행
-    # → 버튼 클릭과 AI 호출을 분리해서 안정적으로 처리
-    st.session_state.page = "processing"
+    # AI 호출은 별도 페이지에서 실행
+    st.session_state.page = (
+        "processing"
+    )
 
     st.rerun()
 
@@ -745,8 +1007,8 @@ def start_screen():
     )
 
     st.caption(
-        "카테고리를 고르고, "
-        "제시어를 그림으로 표현해 보세요!"
+        "제시어를 그림으로 표현하고 "
+        "AI가 무엇인지 맞히게 해보세요!"
     )
 
     with st.expander(
@@ -754,15 +1016,16 @@ def start_screen():
     ):
 
         st.markdown(
-            "- 카테고리를 하나 선택해요.\n"
-            "- 제시어를 보고 **60초 안에** 그림을 그려요.\n"
-            "- **제출하기**를 누르면 AI가 그림을 맞혀요.\n"
-            "- 어려운 문제는 **패스**할 수 있어요.\n"
-            "- 패스는 문제 수에 포함되지 않아요.\n"
-            f"- 총 **{TOTAL_ROUNDS}문제**를 완료하면 결과를 확인해요."
+            f"""
+- 원하는 카테고리를 선택합니다.
+- 제시어를 보고 **{ROUND_LIMIT_SEC}초 안에** 그림을 그립니다.
+- **제출하기**를 누르면 AI가 그림을 분석합니다.
+- 어려운 문제는 **패스**할 수 있습니다.
+- 패스는 한 게임에 최대 **{MAX_PASSES}회** 사용할 수 있습니다.
+- 패스한 문제는 문제 수에 포함되지 않습니다.
+- 총 **{TOTAL_ROUNDS}문제**를 완료하면 결과를 확인합니다.
+"""
         )
-
-    st.write("")
 
     names = list(
         CATEGORIES.keys()
@@ -774,20 +1037,20 @@ def start_screen():
         3
     ):
 
-        row_names = (
-            names[i:i + 3]
+        row = names[
+            i:i + 3
+        ]
+
+        columns = st.columns(
+            len(row)
         )
 
-        cols = st.columns(
-            len(row_names)
-        )
-
-        for col, name in zip(
-            cols,
-            row_names
+        for column, name in zip(
+            columns,
+            row,
         ):
 
-            with col:
+            with column:
 
                 with st.container(
                     border=True
@@ -801,16 +1064,11 @@ def start_screen():
                         ">
                             {CATEGORIES[name]}
                         </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
 
-                    st.markdown(
-                        f"""
                         <div style="
                             text-align:center;
                             font-size:19px;
-                            font-weight:600;
+                            font-weight:700;
                             margin-bottom:8px;
                         ">
                             {name}
@@ -837,7 +1095,7 @@ def start_screen():
 # ============================================================
 
 @st.fragment(
-    run_every="1s"
+    run_every=1.0
 )
 def timer_fragment():
 
@@ -849,17 +1107,18 @@ def timer_fragment():
 
         return
 
-    if (
+    start_time = (
         st.session_state.round_start_time
-        is None
-    ):
+    )
+
+    if start_time is None:
 
         return
 
     elapsed = (
         time.time()
         -
-        st.session_state.round_start_time
+        start_time
     )
 
     remaining = max(
@@ -877,12 +1136,10 @@ def timer_fragment():
 
     st.markdown(
         f"""
-        <div style="
-            text-align:center;
-            color:{color};
-            font-weight:700;
-            font-size:16px;
-        ">
+        <div
+            class="timer-box"
+            style="color:{color};"
+        >
             ⏱ 남은 시간 {remaining}초
         </div>
         """,
@@ -906,12 +1163,12 @@ def timer_fragment():
         )
 
         if (
-            st.session_state._timeout_handled_seq
+            st.session_state.timeout_seq
             !=
             current_seq
         ):
 
-            st.session_state._timeout_handled_seq = (
+            st.session_state.timeout_seq = (
                 current_seq
             )
 
@@ -932,15 +1189,6 @@ def game_screen():
         item["키워드"]
     )
 
-    if (
-        st.session_state.round_start_time
-        is None
-    ):
-
-        st.session_state.round_start_time = (
-            time.time()
-        )
-
     elapsed = (
         time.time()
         -
@@ -959,21 +1207,17 @@ def game_screen():
     )
 
     # --------------------------------------------------------
-    # 상단 정보
+    # 상단
     # --------------------------------------------------------
 
     st.markdown(
         f"""
-        <div style="
-            text-align:center;
-            font-size:14px;
-            color:#777;
-        ">
+        <div class="game-info">
             {st.session_state.category}
             ·
-            {st.session_state.round_idx + 1}
-            /
-            {TOTAL_ROUNDS}
+            {st.session_state.round_idx + 1} / {TOTAL_ROUNDS}
+            ·
+            남은 패스 {MAX_PASSES - st.session_state.passes_used}회
         </div>
         """,
         unsafe_allow_html=True,
@@ -981,19 +1225,12 @@ def game_screen():
 
     st.markdown(
         f"""
-        <h2 style="
-            text-align:center;
-            margin:6px 0 10px;
-        ">
+        <div class="keyword-box">
             ✏️ {keyword}
-        </h2>
+        </div>
         """,
         unsafe_allow_html=True,
     )
-
-    # --------------------------------------------------------
-    # 타이머
-    # --------------------------------------------------------
 
     timer_fragment()
 
@@ -1005,33 +1242,102 @@ def game_screen():
 
         st.warning(
             "⏰ 시간이 다 됐어요! "
-            "마지막 그림으로 자동 제출할게요."
+            "마지막 그림으로 자동 제출합니다."
         )
 
         if (
-            st.session_state._submitted_seq
+            st.session_state.submitted_seq
             !=
             st.session_state.draw_seq
         ):
 
             prepare_submission(
-                st.session_state._last_canvas_data,
+                st.session_state.last_canvas_data,
                 timed_out=True,
             )
 
         return
 
     # ========================================================
+    # 색상 팔레트
+    # ========================================================
+
+    st.caption(
+        "🎨 색상"
+    )
+
+    colors = [
+        ("⚫", "#000000"),
+        ("🔴", "#E53935"),
+        ("🔵", "#1E88E5"),
+        ("🟢", "#43A047"),
+    ]
+
+    palette_columns = (
+        st.columns(4)
+    )
+
+    for column, (
+        label,
+        color,
+    ) in zip(
+        palette_columns,
+        colors,
+    ):
+
+        with column:
+
+            if st.button(
+                label,
+                key=f"color_{color}",
+                use_container_width=True,
+            ):
+
+                st.session_state.stroke_color = (
+                    color
+                )
+
+                st.rerun()
+
+    tool1, tool2 = (
+        st.columns(2)
+    )
+
+    with tool1:
+
+        st.color_picker(
+            "다른 색",
+            key="stroke_color",
+        )
+
+    with tool2:
+
+        st.slider(
+            "펜 굵기",
+            min_value=3,
+            max_value=20,
+            key="stroke_width",
+        )
+
+    # ========================================================
     # 그림판
+    #
+    # streamlit-drawable-canvas 0.13.0 공식 API
     # ========================================================
 
     canvas_result = st_canvas(
 
-        fill_color="rgba(0, 0, 0, 0)",
+        fill_color=(
+            "rgba(0, 0, 0, 0)"
+        ),
 
-        stroke_width=8,
+        stroke_width=(
+            st.session_state.stroke_width
+        ),
 
-        stroke_color="#000000",
+        stroke_color=(
+            st.session_state.stroke_color
+        ),
 
         background_color="#FFFFFF",
 
@@ -1043,7 +1349,7 @@ def game_screen():
 
         update_streamlit=True,
 
-        # drawable-canvas 0.13.0
+        # 0.13.0에서 image_data 사용 시 필수
         return_image_data=True,
 
         key=(
@@ -1053,51 +1359,65 @@ def game_screen():
     )
 
     # --------------------------------------------------------
-    # 현재 캔버스 데이터를 로컬 변수에 즉시 저장
-    #
-    # 제출 버튼을 한 번 눌렀을 때
-    # 바로 이 값을 사용하기 위한 핵심 부분
+    # 현재 캔버스 데이터 즉시 확보
     # --------------------------------------------------------
 
-    current_canvas_data = None
+    current_canvas_data = (
+        st.session_state.last_canvas_data
+    )
 
-    if (
-        canvas_result is not None
-        and
-        canvas_result.image_data
-        is not None
-    ):
+    try:
 
-        current_canvas_data = (
+        if (
+            canvas_result is not None
+            and
             canvas_result.image_data
-        )
+            is not None
+        ):
 
-        st.session_state._last_canvas_data = (
-            current_canvas_data
-        )
+            current_canvas_data = (
+                canvas_result.image_data.copy()
+            )
 
-    else:
+            st.session_state.last_canvas_data = (
+                current_canvas_data
+            )
 
-        current_canvas_data = (
-            st.session_state._last_canvas_data
+    except Exception as exc:
+
+        print(
+            "[Canvas image_data 오류]",
+            type(exc).__name__,
+            str(exc),
         )
 
     # ========================================================
     # 버튼
     # ========================================================
 
-    col1, col2 = st.columns(
-        [1, 1.4]
+    remaining_passes = (
+        MAX_PASSES
+        -
+        st.session_state.passes_used
     )
 
-    with col1:
+    pass_col, submit_col = (
+        st.columns(
+            [1, 1.5]
+        )
+    )
+
+    with pass_col:
 
         pass_clicked = st.button(
-            "🙅 패스",
+            f"🙅 패스 ({remaining_passes})",
+            disabled=(
+                remaining_passes <= 0
+            ),
             use_container_width=True,
         )
 
-    with col2:
+    with submit_col:
 
         submit_clicked = st.button(
             "제출하기 ✅",
@@ -1111,6 +1431,8 @@ def game_screen():
 
     if pass_clicked:
 
+        st.session_state.passes_used += 1
+
         draw_next_keyword()
 
         st.rerun()
@@ -1118,8 +1440,7 @@ def game_screen():
     # --------------------------------------------------------
     # 제출
     #
-    # ★ session_state 갱신을 기다리지 않고
-    # 현재 canvas_result의 값을 바로 넘김
+    # 현재 canvas_result를 바로 전달
     # --------------------------------------------------------
 
     if submit_clicked:
@@ -1150,23 +1471,29 @@ def processing_screen():
         item is None
     ):
 
-        st.session_state.page = "game"
+        st.session_state.page = (
+            "game"
+        )
 
         st.rerun()
 
     st.subheader(
-        "🤖 AI가 생각 중입니다..."
+        "🤖 AI가 생각 중입니다"
     )
 
     st.image(
         image_bytes,
-        width=CANVAS_WIDTH,
+        width=DISPLAY_IMG_WIDTH,
         caption="제출한 그림",
     )
 
     image = Image.open(
-        BytesIO(image_bytes)
-    ).convert("RGB")
+        BytesIO(
+            image_bytes
+        )
+    ).convert(
+        "RGB"
+    )
 
     with st.spinner(
         "그림을 분석하고 있어요..."
@@ -1178,17 +1505,29 @@ def processing_screen():
         )
 
     # ========================================================
-    # AI 오류
+    # API 오류
     # ========================================================
 
-    if not result["success"]:
+    if not result[
+        "success"
+    ]:
 
         st.session_state.ai_error_type = (
-            result["type"]
+            result.get(
+                "type"
+            )
         )
 
         st.session_state.ai_error_message = (
-            result["message"]
+            result.get(
+                "message"
+            )
+        )
+
+        st.session_state.ai_retry_seconds = (
+            result.get(
+                "retry_seconds"
+            )
         )
 
         st.session_state.page = (
@@ -1198,7 +1537,7 @@ def processing_screen():
         st.rerun()
 
     # ========================================================
-    # 정상 응답
+    # 성공
     # ========================================================
 
     ai_answer = (
@@ -1258,6 +1597,8 @@ def ai_error_screen():
 
     message = (
         st.session_state.ai_error_message
+        or
+        "오류 내용을 확인할 수 없습니다."
     )
 
     # --------------------------------------------------------
@@ -1266,12 +1607,19 @@ def ai_error_screen():
 
     if error_type == "quota":
 
+        seconds = (
+            st.session_state.ai_retry_seconds
+            or
+            60
+        )
+
         st.warning(
-            "⏳ AI 무료 사용량 제한에 도달했어요."
+            "⏳ AI 무료 사용량 제한에 도달했습니다."
         )
 
         st.info(
-            message
+            f"약 {seconds}초 후 "
+            f"'AI 다시 호출'을 눌러주세요."
         )
 
     # --------------------------------------------------------
@@ -1281,7 +1629,7 @@ def ai_error_screen():
     elif error_type == "server":
 
         st.warning(
-            "🌐 AI 서버가 혼잡해요."
+            "🌐 Gemini 서버가 현재 혼잡합니다."
         )
 
         st.info(
@@ -1295,41 +1643,56 @@ def ai_error_screen():
     elif error_type == "model":
 
         st.error(
-            "AI 모델 설정을 확인해 주세요."
+            "🤖 Gemini 모델 오류입니다."
         )
 
-        st.write(
+        st.code(
             message
         )
 
     # --------------------------------------------------------
-    # API 설정
+    # API KEY / 권한
     # --------------------------------------------------------
 
     elif error_type == "configuration":
 
         st.error(
-            "Gemini API 설정 오류입니다."
+            "🔑 Gemini API 설정 오류입니다."
         )
 
-        st.write(
+        # 실제 오류를 화면에서 볼 수 있게 함
+        st.code(
+            message
+        )
+
+    # --------------------------------------------------------
+    # 400 요청 오류
+    # --------------------------------------------------------
+
+    elif error_type == "request":
+
+        st.error(
+            "📨 Gemini API 요청 오류입니다."
+        )
+
+        st.code(
             message
         )
 
     else:
 
         st.error(
+            "AI 호출 중 오류가 발생했습니다."
+        )
+
+        st.code(
             message
         )
 
     st.write("")
 
     # --------------------------------------------------------
-    # 다시 호출
-    #
-    # 기존 제출 그림 그대로 재사용
-    # 문제 수 증가 X
-    # 오답 처리 X
+    # 같은 그림 그대로 다시 호출
     # --------------------------------------------------------
 
     if st.button(
@@ -1345,16 +1708,19 @@ def ai_error_screen():
         st.rerun()
 
     # --------------------------------------------------------
-    # 문제로 돌아가기
+    # 그림 다시 그리기
     # --------------------------------------------------------
 
     if st.button(
-        "↩️ 그림 다시 그리기",
+        "🎨 그림 다시 그리기",
         use_container_width=True,
     ):
 
-        # 다시 제출할 수 있게 중복 제출 플래그 해제
-        st.session_state._submitted_seq = (
+        st.session_state.submitted_seq = (
+            None
+        )
+
+        st.session_state.timeout_seq = (
             None
         )
 
@@ -1376,19 +1742,28 @@ def ai_error_screen():
 def grading_screen():
 
     result = (
-        st.session_state.rounds[-1]
+        st.session_state.rounds[
+            -1
+        ]
     )
 
-    if result["correct"]:
+    if result[
+        "correct"
+    ]:
 
         st.markdown(
             """
-            <h2 style="
-                text-align:center;
-                color:#2E7D32;
-            ">
-                ✅ 정답이에요!
-            </h2>
+            <div class="correct-box">
+
+                <div style="
+                    font-size:30px;
+                    font-weight:900;
+                    color:#15803d;
+                ">
+                    ✅ 정답이에요!
+                </div>
+
+            </div>
             """,
             unsafe_allow_html=True,
         )
@@ -1397,15 +1772,22 @@ def grading_screen():
 
         st.markdown(
             """
-            <h2 style="
-                text-align:center;
-                color:#D32F2F;
-            ">
-                ❌ 아쉬워요
-            </h2>
+            <div class="wrong-box">
+
+                <div style="
+                    font-size:30px;
+                    font-weight:900;
+                    color:#b91c1c;
+                ">
+                    ❌ 아쉬워요
+                </div>
+
+            </div>
             """,
             unsafe_allow_html=True,
         )
+
+    st.write("")
 
     st.image(
         result["image_bytes"],
@@ -1416,14 +1798,25 @@ def grading_screen():
         f"""
         <div style="
             text-align:center;
-            font-size:19px;
-            margin-top:8px;
+            margin-top:10px;
         ">
-            정답:
-            <b>{result['keyword']}</b>
-            &nbsp;·&nbsp;
-            AI의 대답:
-            <b>{result['ai_answer']}</b>
+
+            <div class="answer-label">
+                🎯 정답
+            </div>
+
+            <div class="answer-text">
+                {result['keyword']}
+            </div>
+
+            <div class="answer-label">
+                🤖 AI의 대답
+            </div>
+
+            <div class="answer-text">
+                {result['ai_answer']}
+            </div>
+
         </div>
         """,
         unsafe_allow_html=True,
@@ -1433,11 +1826,10 @@ def grading_screen():
         "timed_out"
     ):
 
-        st.caption(
-            "⏰ 제한시간 종료 후 자동 제출된 그림입니다."
+        st.info(
+            "⏰ 제한시간 종료 후 "
+            "자동 제출된 그림입니다."
         )
-
-    st.write("")
 
     is_last = (
         st.session_state.round_idx
@@ -1446,7 +1838,7 @@ def grading_screen():
     )
 
     label = (
-        "결과 보기 →"
+        "🏆 결과 보기 →"
         if is_last
         else
         "다음 문제 →"
@@ -1486,7 +1878,7 @@ def result_screen():
     )
 
     st.subheader(
-        f"카테고리: "
+        f"{CATEGORIES.get(st.session_state.category, '')} "
         f"{st.session_state.category}"
     )
 
@@ -1495,6 +1887,12 @@ def result_screen():
         for result
         in st.session_state.rounds
         if result["correct"]
+    )
+
+    st.metric(
+        "맞힌 개수",
+        f"{correct_count} / "
+        f"{len(st.session_state.rounds)}",
     )
 
     for index, result in enumerate(
@@ -1506,8 +1904,10 @@ def result_screen():
             border=True
         ):
 
-            col1, col2 = st.columns(
-                [1, 1.6]
+            col1, col2 = (
+                st.columns(
+                    [1, 1.6]
+                )
             )
 
             with col1:
@@ -1519,9 +1919,19 @@ def result_screen():
 
             with col2:
 
-                st.markdown(
-                    f"### {index}번 문제"
-                )
+                if result[
+                    "correct"
+                ]:
+
+                    st.markdown(
+                        f"### ✅ {index}번 정답"
+                    )
+
+                else:
+
+                    st.markdown(
+                        f"### ❌ {index}번 오답"
+                    )
 
                 st.markdown(
                     f"🎯 정답: "
@@ -1529,34 +1939,15 @@ def result_screen():
                 )
 
                 st.markdown(
-                    f"🤖 AI의 대답: "
+                    f"🤖 AI: "
                     f"**{result['ai_answer']}**"
                 )
-
-                if result["correct"]:
-
-                    st.success(
-                        "✅ 정답이에요!"
-                    )
-
-                else:
-
-                    st.error(
-                        "❌ 아쉬워요"
-                    )
-
-    st.write("")
-
-    st.metric(
-        "맞힌 개수",
-        f"{correct_count} / "
-        f"{len(st.session_state.rounds)}",
-    )
 
     st.write("")
 
     if st.button(
-        "처음으로 돌아가기",
+        "🔁 처음부터 다시 하기",
+        type="primary",
         use_container_width=True,
     ):
 
@@ -1564,35 +1955,66 @@ def result_screen():
             st.session_state.keys()
         ):
 
-            del st.session_state[key]
+            del st.session_state[
+                key
+            ]
 
         st.rerun()
 
 
 # ============================================================
-# 라우팅
+# 페이지 라우팅
 # ============================================================
 
-if st.session_state.page == "start":
+if (
+    st.session_state.page
+    ==
+    "start"
+):
 
     start_screen()
 
-elif st.session_state.page == "game":
+
+elif (
+    st.session_state.page
+    ==
+    "game"
+):
 
     game_screen()
 
-elif st.session_state.page == "processing":
+
+elif (
+    st.session_state.page
+    ==
+    "processing"
+):
 
     processing_screen()
 
-elif st.session_state.page == "ai_error":
+
+elif (
+    st.session_state.page
+    ==
+    "ai_error"
+):
 
     ai_error_screen()
 
-elif st.session_state.page == "grading":
+
+elif (
+    st.session_state.page
+    ==
+    "grading"
+):
 
     grading_screen()
 
-elif st.session_state.page == "result":
+
+elif (
+    st.session_state.page
+    ==
+    "result"
+):
 
     result_screen()
