@@ -31,9 +31,7 @@ CANVAS_HEIGHT = 360
 DISPLAY_IMG_WIDTH = 420
 THUMB_IMG_WIDTH = 170
 
-# 현재 안정적인 경량 모델
 GEMINI_MODEL = "gemini-3.5-flash-lite"
-
 
 CATEGORIES = {
     "동물": "🐶",
@@ -60,7 +58,7 @@ st.markdown(
     .game-info {
         text-align: center;
         font-size: 15px;
-        color: #666;
+        color: #666666;
         margin-bottom: 4px;
     }
 
@@ -100,7 +98,7 @@ st.markdown(
     .result-label {
         text-align: center;
         font-size: 16px;
-        color: #666;
+        color: #666666;
         font-weight: 700;
         margin-top: 12px;
     }
@@ -125,12 +123,11 @@ st.markdown(
 
 
 # ============================================================
-# Session State 초기화
+# Session State
 # ============================================================
 
 DEFAULTS = {
     "page": "start",
-
     "category": None,
 
     "keyword_pool": [],
@@ -144,7 +141,6 @@ DEFAULTS = {
     "round_start_time": None,
 
     "draw_seq": 0,
-
     "last_canvas_data": None,
 
     "submitted_seq": None,
@@ -161,7 +157,6 @@ DEFAULTS = {
     "stroke_color": "#000000",
     "stroke_width": 8,
 }
-
 
 for key, value in DEFAULTS.items():
     if key not in st.session_state:
@@ -180,10 +175,7 @@ def load_keywords():
         encoding="utf-8-sig",
     )
 
-    required = {
-        "카테고리",
-        "키워드",
-    }
+    required = {"카테고리", "키워드"}
 
     if not required.issubset(df.columns):
         raise ValueError(
@@ -194,11 +186,7 @@ def load_keywords():
         df["유사정답"] = ""
 
     df = df[
-        [
-            "카테고리",
-            "키워드",
-            "유사정답",
-        ]
+        ["카테고리", "키워드", "유사정답"]
     ].copy()
 
     df["카테고리"] = (
@@ -226,8 +214,7 @@ def get_gemini_client():
 
         if "GEMINI_API_KEY" not in st.secrets:
             return None, (
-                "Streamlit Secrets에 "
-                "GEMINI_API_KEY가 없습니다."
+                "Streamlit Secrets에 GEMINI_API_KEY가 없습니다."
             )
 
         api_key = str(
@@ -275,9 +262,7 @@ def blank_canvas_image():
     )
 
 
-def canvas_array_to_pil(
-    image_data,
-):
+def canvas_array_to_pil(image_data):
 
     rgba = Image.fromarray(
         image_data.astype("uint8"),
@@ -298,9 +283,7 @@ def canvas_array_to_pil(
     return white_background
 
 
-def pil_to_png_bytes(
-    image,
-):
+def pil_to_png_bytes(image):
 
     buffer = BytesIO()
 
@@ -312,21 +295,16 @@ def pil_to_png_bytes(
     return buffer.getvalue()
 
 
-def optimize_image_for_ai(
-    image,
-):
+def optimize_image_for_ai(image):
 
     optimized = image.copy()
 
-    # AI에 보내는 이미지만 축소
     optimized.thumbnail(
         (384, 384)
     )
 
     if optimized.mode != "RGB":
-        optimized = optimized.convert(
-            "RGB"
-        )
+        optimized = optimized.convert("RGB")
 
     return optimized
 
@@ -335,9 +313,7 @@ def optimize_image_for_ai(
 # AI 답변 정리
 # ============================================================
 
-def clean_ai_answer(
-    text,
-):
+def clean_ai_answer(text):
 
     if not text:
         return ""
@@ -365,9 +341,7 @@ def clean_ai_answer(
 # 429 Retry 시간
 # ============================================================
 
-def extract_retry_seconds(
-    message,
-):
+def extract_retry_seconds(message):
 
     patterns = [
         r"retry in ([0-9.]+)s",
@@ -386,9 +360,7 @@ def extract_retry_seconds(
 
             try:
                 return int(
-                    float(
-                        match.group(1)
-                    )
+                    float(match.group(1))
                 ) + 1
 
             except Exception:
@@ -422,29 +394,26 @@ def ask_ai_guess(
         image
     )
 
-    ai_image_bytes = pil_to_png_bytes(
+    image_bytes = pil_to_png_bytes(
         ai_image
     )
 
     image_part = types.Part.from_bytes(
-        data=ai_image_bytes,
+        data=image_bytes,
         mime_type="image/png",
     )
 
     prompt = (
         f"초등학생이 그린 그림 퀴즈이다. "
         f"카테고리는 '{category}'이다. "
-        f"형태와 윤곽을 보고 무엇인지 추론하라. "
+        f"형태와 윤곽을 보고 무엇인지 맞혀라. "
         f"반드시 '{category}'에 속하는 대상 하나를 "
         f"설명 없이 한 단어로만 답하라."
     )
 
-    # 최초 호출 + 503일 때만 1회 재시도
     max_attempts = 2
 
-    for attempt in range(
-        max_attempts
-    ):
+    for attempt in range(max_attempts):
 
         try:
 
@@ -463,10 +432,8 @@ def ask_ai_guess(
                         image_part,
                     ],
 
-                    config=(
-                        types.GenerateContentConfig(
-                            max_output_tokens=16,
-                        )
+                    config=types.GenerateContentConfig(
+                        max_output_tokens=16,
                     ),
                 )
             )
@@ -511,10 +478,7 @@ def ask_ai_guess(
                 message,
             )
 
-            # ---------------------------------------------
             # 429
-            # ---------------------------------------------
-
             if (
                 "429" in message
                 or
@@ -534,10 +498,7 @@ def ask_ai_guess(
                     ),
                 }
 
-            # ---------------------------------------------
             # 503
-            # ---------------------------------------------
-
             if (
                 "503" in message
                 or
@@ -558,10 +519,7 @@ def ask_ai_guess(
                     ),
                 }
 
-            # ---------------------------------------------
             # 404
-            # ---------------------------------------------
-
             if (
                 "404" in message
                 or
@@ -578,10 +536,7 @@ def ask_ai_guess(
                     ),
                 }
 
-            # ---------------------------------------------
             # 401
-            # ---------------------------------------------
-
             if "401" in message:
 
                 return {
@@ -593,10 +548,7 @@ def ask_ai_guess(
                     ),
                 }
 
-            # ---------------------------------------------
             # 403
-            # ---------------------------------------------
-
             if "403" in message:
 
                 return {
@@ -608,10 +560,7 @@ def ask_ai_guess(
                     ),
                 }
 
-            # ---------------------------------------------
             # 400
-            # ---------------------------------------------
-
             if "400" in message:
 
                 return {
@@ -637,9 +586,7 @@ def ask_ai_guess(
 # 정답 판정
 # ============================================================
 
-def normalize_answer(
-    text,
-):
+def normalize_answer(text):
 
     return re.sub(
         r"\s+",
@@ -670,9 +617,7 @@ def is_correct(
         similar.strip()
     ):
 
-        for answer in similar.split(
-            "|"
-        ):
+        for answer in similar.split("|"):
 
             answer = answer.strip()
 
@@ -685,9 +630,7 @@ def is_correct(
                 )
 
     return (
-        normalize_answer(
-            ai_answer
-        )
+        normalize_answer(ai_answer)
         in
         valid_answers
     )
@@ -777,9 +720,7 @@ def draw_next_keyword():
 # 게임 시작
 # ============================================================
 
-def start_new_game(
-    category,
-):
+def start_new_game(category):
 
     df = load_keywords()
 
@@ -866,7 +807,6 @@ def prepare_submission(
         st.session_state.draw_seq
     )
 
-    # 중복 제출 방지
     if (
         st.session_state.submitted_seq
         ==
@@ -1244,6 +1184,10 @@ def game_screen():
 
     # ========================================================
     # 그림판
+    #
+    # 중요:
+    # return_image_data=True 필수
+    # display_toolbar 사용 금지
     # ========================================================
 
     canvas_result = st_canvas(
@@ -1266,6 +1210,8 @@ def game_screen():
 
         update_streamlit=True,
 
+        return_image_data=True,
+
         key=(
             f"canvas_"
             f"{st.session_state.draw_seq}"
@@ -1274,6 +1220,8 @@ def game_screen():
 
     # --------------------------------------------------------
     # 현재 그림 확보
+    #
+    # getattr 사용하지 않음
     # --------------------------------------------------------
 
     current_canvas_data = (
@@ -1283,25 +1231,12 @@ def game_screen():
     if (
         canvas_result is not None
         and
-        getattr(
-            canvas_result,
-            "image_data",
-            None,
-        )
-        is not None
+        canvas_result.image_data is not None
     ):
 
-        try:
-
-            current_canvas_data = (
-                canvas_result.image_data.copy()
-            )
-
-        except Exception:
-
-            current_canvas_data = (
-                canvas_result.image_data
-            )
+        current_canvas_data = (
+            canvas_result.image_data.copy()
+        )
 
         st.session_state.last_canvas_data = (
             current_canvas_data
@@ -1341,6 +1276,10 @@ def game_screen():
             use_container_width=True,
         )
 
+    # --------------------------------------------------------
+    # 패스
+    # --------------------------------------------------------
+
     if pass_clicked:
 
         st.session_state.passes_used += 1
@@ -1348,6 +1287,10 @@ def game_screen():
         draw_next_keyword()
 
         st.rerun()
+
+    # --------------------------------------------------------
+    # 제출
+    # --------------------------------------------------------
 
     if submit_clicked:
 
@@ -1443,7 +1386,7 @@ def processing_screen():
         st.rerun()
 
     # --------------------------------------------------------
-    # 성공
+    # 정상 응답
     # --------------------------------------------------------
 
     ai_answer = (
@@ -1575,7 +1518,7 @@ def ai_error_screen():
 
     st.write("")
 
-    # 같은 그림으로 다시 호출
+    # 같은 그림 재호출
     if st.button(
         "🔄 AI 다시 호출",
         type="primary",
@@ -1623,13 +1566,6 @@ def grading_screen():
         st.session_state.rounds[-1]
     )
 
-    # --------------------------------------------------------
-    # 정답 / 오답 표시
-    #
-    # HTML을 문자열로 노출하지 않도록
-    # st.markdown + unsafe_allow_html=True 사용
-    # --------------------------------------------------------
-
     if result["correct"]:
 
         st.markdown(
@@ -1671,10 +1607,6 @@ def grading_screen():
         width=DISPLAY_IMG_WIDTH,
     )
 
-    # --------------------------------------------------------
-    # 정답
-    # --------------------------------------------------------
-
     st.markdown(
         """
         <div class="result-label">
@@ -1692,10 +1624,6 @@ def grading_screen():
         """,
         unsafe_allow_html=True,
     )
-
-    # --------------------------------------------------------
-    # AI 답
-    # --------------------------------------------------------
 
     st.markdown(
         """
@@ -1849,9 +1777,7 @@ def result_screen():
             st.session_state.keys()
         ):
 
-            del st.session_state[
-                key
-            ]
+            del st.session_state[key]
 
         st.rerun()
 
